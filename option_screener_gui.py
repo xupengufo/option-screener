@@ -267,21 +267,42 @@ def main():
                 st.plotly_chart(fig2, use_container_width=True)
             
             # 散点图：收益率 vs 风险
-            fig3 = px.scatter(
-                result_df,
-                x='approx_delta',
-                y='annualizedReturn',
-                size='volume',
-                hover_data=['strike', 'dte', 'premium'],
-                title='收益率 vs 风险分析',
-                labels={
-                    'approx_delta': '近似Delta (风险指标)',
-                    'annualizedReturn': '年化收益率',
-                    'volume': '成交量'
-                }
-            )
-            fig3.update_layout(yaxis_tickformat='.2%')
-            st.plotly_chart(fig3, use_container_width=True)
+            # 处理数据中的 NaN 值和无效数据
+            plot_df = result_df.copy()
+            
+            # 清理数据
+            plot_df['volume'] = pd.to_numeric(plot_df['volume'], errors='coerce').fillna(1)
+            plot_df['approx_delta'] = pd.to_numeric(plot_df['approx_delta'], errors='coerce')
+            plot_df['annualizedReturn'] = pd.to_numeric(plot_df['annualizedReturn'], errors='coerce')
+            plot_df['strike'] = pd.to_numeric(plot_df['strike'], errors='coerce')
+            plot_df['dte'] = pd.to_numeric(plot_df['dte'], errors='coerce')
+            plot_df['premium'] = pd.to_numeric(plot_df['premium'], errors='coerce')
+            
+            # 移除包含 NaN 的行
+            plot_df = plot_df.dropna(subset=['approx_delta', 'annualizedReturn', 'volume'])
+            plot_df = plot_df[plot_df['volume'] > 0]  # 只保留volume > 0的数据
+            
+            if not plot_df.empty and len(plot_df) > 1:
+                try:
+                    fig3 = px.scatter(
+                        plot_df,
+                        x='approx_delta',
+                        y='annualizedReturn',
+                        size='volume',
+                        hover_data=['strike', 'dte', 'premium'],
+                        title='收益率 vs 风险分析',
+                        labels={
+                            'approx_delta': '近似Delta (风险指标)',
+                            'annualizedReturn': '年化收益率',
+                            'volume': '成交量'
+                        }
+                    )
+                    fig3.update_layout(yaxis_tickformat='.2%')
+                    st.plotly_chart(fig3, use_container_width=True)
+                except Exception as e:
+                    st.info(f"散点图生成遇到问题，跳过显示: {str(e)}")
+            else:
+                st.info("数据不足，无法生成散点图")
             
         else:
             st.warning("未找到符合条件的期权机会，请尝试调整筛选条件")
