@@ -19,21 +19,45 @@ DEFAULT_DAYS_TO_EXPIRATION_MAX = 45
 DEFAULT_OTM_PERCENTAGE_MIN = 0.05
 DEFAULT_OTM_PERCENTAGE_MAX = 0.15
 
+@st.cache_data(ttl=300)  # 缓存5分钟
 def get_stock_data(ticker_symbol):
     """获取股票数据和当前价格"""
     try:
         stock = yf.Ticker(ticker_symbol)
-        current_price = stock.info.get('regularMarketPrice')
         
-        if current_price is None:
-            current_price = stock.history(period='1d')['Close'].iloc[-1]
+        # 尝试多种方式获取当前价格
+        current_price = None
+        
+        # 方法1: 从info获取
+        try:
+            current_price = stock.info.get('regularMarketPrice')
+        except:
+            pass
+            
+        # 方法2: 从历史数据获取
+        if current_price is None or pd.isna(current_price):
+            try:
+                hist = stock.history(period='1d')
+                if not hist.empty:
+                    current_price = hist['Close'].iloc[-1]
+            except:
+                pass
+        
+        # 方法3: 从快速信息获取
+        if current_price is None or pd.isna(current_price):
+            try:
+                fast_info = stock.fast_info
+                current_price = fast_info.last_price
+            except:
+                pass
 
-        if pd.isna(current_price):
+        if current_price is None or pd.isna(current_price):
             raise ValueError(f"无法获取 {ticker_symbol} 的有效价格")
             
-        return stock, current_price
+        return stock, float(current_price)
     except Exception as e:
         st.error(f"获取股票数据时出错: {e}")
+        st.info("💡 提示：请检查股票代码是否正确，或稍后重试")
         return None, None
 
 def find_potential_expirations(stock, min_dte, max_dte):
