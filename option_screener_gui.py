@@ -20,8 +20,8 @@ DEFAULT_OTM_PERCENTAGE_MIN = 0.05
 DEFAULT_OTM_PERCENTAGE_MAX = 0.15
 
 @st.cache_data(ttl=300)  # 缓存5分钟
-def get_stock_data(ticker_symbol):
-    """获取股票数据和当前价格"""
+def get_stock_price(ticker_symbol):
+    """获取股票当前价格（可缓存）"""
     try:
         stock = yf.Ticker(ticker_symbol)
         
@@ -54,7 +54,24 @@ def get_stock_data(ticker_symbol):
         if current_price is None or pd.isna(current_price):
             raise ValueError(f"无法获取 {ticker_symbol} 的有效价格")
             
-        return stock, float(current_price)
+        return float(current_price)
+    except Exception as e:
+        # 不在这里显示错误，让调用函数处理
+        return None
+
+def get_stock_data(ticker_symbol):
+    """获取股票数据和当前价格"""
+    try:
+        # 获取缓存的价格
+        current_price = get_stock_price(ticker_symbol)
+        if current_price is None:
+            st.error(f"获取股票数据时出错")
+            st.info("💡 提示：请检查股票代码是否正确，或稍后重试")
+            return None, None
+            
+        # 创建新的股票对象（不缓存）
+        stock = yf.Ticker(ticker_symbol)
+        return stock, current_price
     except Exception as e:
         st.error(f"获取股票数据时出错: {e}")
         st.info("💡 提示：请检查股票代码是否正确，或稍后重试")
@@ -64,11 +81,14 @@ def find_potential_expirations(stock, min_dte, max_dte):
     """查找指定DTE范围内的到期日"""
     today = date.today()
     potential_expirations = []
-    for exp_str in stock.options:
-        exp_date = date.fromisoformat(exp_str)
-        dte = (exp_date - today).days
-        if min_dte <= dte <= max_dte:
-            potential_expirations.append((exp_str, dte))
+    try:
+        for exp_str in stock.options:
+            exp_date = date.fromisoformat(exp_str)
+            dte = (exp_date - today).days
+            if min_dte <= dte <= max_dte:
+                potential_expirations.append((exp_str, dte))
+    except Exception as e:
+        st.error(f"获取期权到期日时出错: {e}")
     return potential_expirations
 
 def analyze_and_filter_puts(stock, exp, dte, current_price, min_otm, max_otm):
@@ -112,7 +132,7 @@ def analyze_and_filter_puts(stock, exp, dte, current_price, min_otm, max_otm):
         
         return filtered_puts
     except Exception as e:
-        st.error(f"分析期权数据时出错: {e}")
+        st.error(f"分析看跌期权数据时出错: {e}")
         return pd.DataFrame()
 
 def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
@@ -156,7 +176,7 @@ def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
         
         return filtered_calls
     except Exception as e:
-        st.error(f"分析期权数据时出错: {e}")
+        st.error(f"分析看涨期权数据时出错: {e}")
         return pd.DataFrame()
 
 def screen_options_gui(ticker, min_dte, max_dte, min_otm, max_otm, strategy_type):
@@ -180,17 +200,21 @@ def screen_options_gui(ticker, min_dte, max_dte, min_otm, max_otm, strategy_type
     progress_bar = st.progress(0)
     
     for i, (exp, dte) in enumerate(expirations):
-        if strategy_type == "现金担保看跌期权":
-            opportunities = analyze_and_filter_puts(
-                stock, exp, dte, current_price, min_otm, max_otm
-            )
-        else:  # 备兑看涨期权
-            opportunities = analyze_and_filter_calls(
-                stock, exp, dte, current_price, min_otm, max_otm
-            )
+        try:
+            if strategy_type == "现金担保看跌期权":
+                opportunities = analyze_and_filter_puts(
+                    stock, exp, dte, current_price, min_otm, max_otm
+                )
+            else:  # 备兑看涨期权
+                opportunities = analyze_and_filter_calls(
+                    stock, exp, dte, current_price, min_otm, max_otm
+                )
+                
+            if not opportunities.empty:
+                all_opportunities.append(opportunities)
+        except Exception as e:
+            st.warning(f"处理到期日 {exp} 时出错: {e}")
             
-        if not opportunities.empty:
-            all_opportunities.append(opportunities)
         progress_bar.progress((i + 1) / len(expirations))
 
     if not all_opportunities:
@@ -281,123 +305,134 @@ def main():
             return
         
         # 执行筛选
-        result_df, current_price = screen_options_gui(ticker, min_dte, max_dte, min_otm, max_otm, strategy_type)
-        
-        if current_price is None:
-            return
+        try:
+            result_df, current_price = screen_options_gui(ticker, min_dte, max_dte, min_otm, max_otm, strategy_type)
             
-        # 显示当前价格和策略信息
-        col1, col2, col3, col4 = st.columns(4)
-        with col1:
-            st.metric("股票代码", ticker)
-        with col2:
-            st.metric("当前价格", f"${current_price:.2f}")
-        with col3:
-            st.metric("策略类型", strategy_type)
-        with col4:
-            if result_df is not None and not result_df.empty:
-                st.metric("找到机会", f"{len(result_df)} 个")
-            else:
-                st.metric("找到机会", "0 个")
-        
-        st.markdown("---")
-        
-        # 显示结果
-        if result_df is not None and not result_df.empty:
-            st.subheader(f"🎯 {strategy_type}筛选结果")
-            
-            # 准备显示数据
-            display_df = result_df[[
-                'contractSymbol', 'dte', 'strike', 'premium', 'approx_delta',
-                'volume', 'openInterest', 'annualizedReturn'
-            ]].copy()
-            
-            # 格式化数据
-            display_df['strike'] = display_df['strike'].map('${:.2f}'.format)
-            display_df['premium'] = display_df['premium'].map('${:.2f}'.format)
-            display_df['approx_delta'] = display_df['approx_delta'].map('{:.3f}'.format)
-            display_df['annualizedReturn'] = display_df['annualizedReturn'].map('{:.2%}'.format)
-            
-            # 重命名列
-            display_df.columns = [
-                '合约代码', '到期天数', '行权价', '权利金', '近似Delta',
-                '成交量', '持仓量', '年化收益率'
-            ]
-            
-            # 显示表格
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True
-            )
-            
-            # 创建图表
-            st.subheader("📊 数据可视化")
-            
-            col1, col2 = st.columns(2)
-            
+            if current_price is None:
+                return
+                
+            # 显示当前价格和策略信息
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                # 年化收益率图表
-                fig1 = px.bar(
-                    result_df.head(10), 
-                    x='strike', 
-                    y='annualizedReturn',
-                    title='前10个机会的年化收益率',
-                    labels={'strike': '行权价', 'annualizedReturn': '年化收益率'}
-                )
-                fig1.update_layout(yaxis_tickformat='.2%')
-                st.plotly_chart(fig1, use_container_width=True)
-            
+                st.metric("股票代码", ticker)
             with col2:
-                # 到期天数分布
-                fig2 = px.histogram(
-                    result_df, 
-                    x='dte',
-                    title='到期天数分布',
-                    labels={'dte': '到期天数', 'count': '数量'}
+                st.metric("当前价格", f"${current_price:.2f}")
+            with col3:
+                st.metric("策略类型", strategy_type)
+            with col4:
+                if result_df is not None and not result_df.empty:
+                    st.metric("找到机会", f"{len(result_df)} 个")
+                else:
+                    st.metric("找到机会", "0 个")
+            
+            st.markdown("---")
+            
+            # 显示结果
+            if result_df is not None and not result_df.empty:
+                st.subheader(f"🎯 {strategy_type}筛选结果")
+                
+                # 准备显示数据
+                display_df = result_df[[
+                    'contractSymbol', 'dte', 'strike', 'premium', 'approx_delta',
+                    'volume', 'openInterest', 'annualizedReturn'
+                ]].copy()
+                
+                # 格式化数据
+                display_df['strike'] = display_df['strike'].map('${:.2f}'.format)
+                display_df['premium'] = display_df['premium'].map('${:.2f}'.format)
+                display_df['approx_delta'] = display_df['approx_delta'].map('{:.3f}'.format)
+                display_df['annualizedReturn'] = display_df['annualizedReturn'].map('{:.2%}'.format)
+                
+                # 重命名列
+                display_df.columns = [
+                    '合约代码', '到期天数', '行权价', '权利金', '近似Delta',
+                    '成交量', '持仓量', '年化收益率'
+                ]
+                
+                # 显示表格
+                st.dataframe(
+                    display_df,
+                    use_container_width=True,
+                    hide_index=True
                 )
-                st.plotly_chart(fig2, use_container_width=True)
-            
-            # 散点图：收益率 vs 风险
-            # 处理数据中的 NaN 值和无效数据
-            plot_df = result_df.copy()
-            
-            # 清理数据
-            plot_df['volume'] = pd.to_numeric(plot_df['volume'], errors='coerce').fillna(1)
-            plot_df['approx_delta'] = pd.to_numeric(plot_df['approx_delta'], errors='coerce')
-            plot_df['annualizedReturn'] = pd.to_numeric(plot_df['annualizedReturn'], errors='coerce')
-            plot_df['strike'] = pd.to_numeric(plot_df['strike'], errors='coerce')
-            plot_df['dte'] = pd.to_numeric(plot_df['dte'], errors='coerce')
-            plot_df['premium'] = pd.to_numeric(plot_df['premium'], errors='coerce')
-            
-            # 移除包含 NaN 的行
-            plot_df = plot_df.dropna(subset=['approx_delta', 'annualizedReturn', 'volume'])
-            plot_df = plot_df[plot_df['volume'] > 0]  # 只保留volume > 0的数据
-            
-            if not plot_df.empty and len(plot_df) > 1:
+                
+                # 创建图表
+                st.subheader("📊 数据可视化")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    # 年化收益率图表
+                    try:
+                        fig1 = px.bar(
+                            result_df.head(10), 
+                            x='strike', 
+                            y='annualizedReturn',
+                            title='前10个机会的年化收益率',
+                            labels={'strike': '行权价', 'annualizedReturn': '年化收益率'}
+                        )
+                        fig1.update_layout(yaxis_tickformat='.2%')
+                        st.plotly_chart(fig1, use_container_width=True)
+                    except Exception as e:
+                        st.info(f"年化收益率图表生成失败: {e}")
+                
+                with col2:
+                    # 到期天数分布
+                    try:
+                        fig2 = px.histogram(
+                            result_df, 
+                            x='dte',
+                            title='到期天数分布',
+                            labels={'dte': '到期天数', 'count': '数量'}
+                        )
+                        st.plotly_chart(fig2, use_container_width=True)
+                    except Exception as e:
+                        st.info(f"到期天数分布图表生成失败: {e}")
+                
+                # 散点图：收益率 vs 风险
                 try:
-                    fig3 = px.scatter(
-                        plot_df,
-                        x='approx_delta',
-                        y='annualizedReturn',
-                        size='volume',
-                        hover_data=['strike', 'dte', 'premium'],
-                        title='收益率 vs 风险分析',
-                        labels={
-                            'approx_delta': '近似Delta (风险指标)',
-                            'annualizedReturn': '年化收益率',
-                            'volume': '成交量'
-                        }
-                    )
-                    fig3.update_layout(yaxis_tickformat='.2%')
-                    st.plotly_chart(fig3, use_container_width=True)
+                    # 处理数据中的 NaN 值和无效数据
+                    plot_df = result_df.copy()
+                    
+                    # 清理数据
+                    plot_df['volume'] = pd.to_numeric(plot_df['volume'], errors='coerce').fillna(1)
+                    plot_df['approx_delta'] = pd.to_numeric(plot_df['approx_delta'], errors='coerce')
+                    plot_df['annualizedReturn'] = pd.to_numeric(plot_df['annualizedReturn'], errors='coerce')
+                    plot_df['strike'] = pd.to_numeric(plot_df['strike'], errors='coerce')
+                    plot_df['dte'] = pd.to_numeric(plot_df['dte'], errors='coerce')
+                    plot_df['premium'] = pd.to_numeric(plot_df['premium'], errors='coerce')
+                    
+                    # 移除包含 NaN 的行
+                    plot_df = plot_df.dropna(subset=['approx_delta', 'annualizedReturn', 'volume'])
+                    plot_df = plot_df[plot_df['volume'] > 0]  # 只保留volume > 0的数据
+                    
+                    if not plot_df.empty and len(plot_df) > 1:
+                        fig3 = px.scatter(
+                            plot_df,
+                            x='approx_delta',
+                            y='annualizedReturn',
+                            size='volume',
+                            hover_data=['strike', 'dte', 'premium'],
+                            title='收益率 vs 风险分析',
+                            labels={
+                                'approx_delta': '近似Delta (风险指标)',
+                                'annualizedReturn': '年化收益率',
+                                'volume': '成交量'
+                            }
+                        )
+                        fig3.update_layout(yaxis_tickformat='.2%')
+                        st.plotly_chart(fig3, use_container_width=True)
+                    else:
+                        st.info("数据不足，无法生成散点图")
                 except Exception as e:
-                    st.info(f"散点图生成遇到问题，跳过显示: {str(e)}")
+                    st.info(f"散点图生成遇到问题: {str(e)}")
+                
             else:
-                st.info("数据不足，无法生成散点图")
-            
-        else:
-            st.warning("未找到符合条件的期权机会，请尝试调整筛选条件")
+                st.warning("未找到符合条件的期权机会，请尝试调整筛选条件")
+                
+        except Exception as e:
+            st.error(f"筛选过程中出现错误: {e}")
+            st.info("请检查网络连接或稍后重试")
     
     # 说明信息
     st.markdown("---")
