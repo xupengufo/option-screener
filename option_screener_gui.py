@@ -91,10 +91,37 @@ def find_potential_expirations(stock, min_dte, max_dte):
         st.error(f"获取期权到期日时出错: {e}")
     return potential_expirations
 
+def get_real_greeks(stock, exp, option_type='puts'):
+    """获取真实的希腊字母数据"""
+    try:
+        option_chain = stock.option_chain(exp)
+        if option_type == 'puts':
+            options_df = option_chain.puts
+        else:
+            options_df = option_chain.calls
+        
+        # 检查是否有真实的希腊字母数据
+        greek_columns = ['delta', 'gamma', 'theta', 'vega', 'rho']
+        available_greeks = [col for col in greek_columns if col in options_df.columns]
+        
+        if available_greeks:
+            st.info(f"✅ 获取到真实希腊字母数据: {', '.join(available_greeks)}")
+            return options_df, True
+        else:
+            st.info("⚠️ 未获取到希腊字母数据，将使用计算值")
+            return options_df, False
+            
+    except Exception as e:
+        st.warning(f"获取希腊字母数据时出错: {e}")
+        return None, False
+
 def analyze_and_filter_puts(stock, exp, dte, current_price, min_otm, max_otm):
     """分析和筛选看跌期权"""
     try:
-        puts = stock.option_chain(exp).puts
+        # 获取期权数据和希腊字母
+        puts, has_greeks = get_real_greeks(stock, exp, 'puts')
+        if puts is None:
+            return pd.DataFrame()
 
         # 按OTM范围筛选
         min_strike = current_price * (1 - max_otm)
@@ -127,8 +154,16 @@ def analyze_and_filter_puts(stock, exp, dte, current_price, min_otm, max_otm):
         
         filtered_puts['dte'] = dte
         
-        # 计算近似delta
-        filtered_puts['approx_delta'] = abs(filtered_puts['strike'] - current_price) / current_price
+        # 获取真实Delta数据
+        if has_greeks and 'delta' in filtered_puts.columns:
+            # 使用真实Delta数据
+            filtered_puts['real_delta'] = abs(filtered_puts['delta'])
+            st.success(f"✅ 使用真实Delta数据 (范围: {filtered_puts['real_delta'].min():.3f} - {filtered_puts['real_delta'].max():.3f})")
+        else:
+            # 使用改进的近似计算
+            # 对于看跌期权，Delta通常为负值，我们取绝对值
+            filtered_puts['real_delta'] = abs(filtered_puts['strike'] - current_price) / current_price
+            st.info("ℹ️ 使用计算的Delta近似值")
         
         return filtered_puts
     except Exception as e:
@@ -138,7 +173,10 @@ def analyze_and_filter_puts(stock, exp, dte, current_price, min_otm, max_otm):
 def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
     """分析和筛选看涨期权"""
     try:
-        calls = stock.option_chain(exp).calls
+        # 获取期权数据和希腊字母
+        calls, has_greeks = get_real_greeks(stock, exp, 'calls')
+        if calls is None:
+            return pd.DataFrame()
 
         # 按OTM范围筛选 (对于看涨期权，OTM意味着行权价高于当前价格)
         min_strike = current_price * (1 + min_otm)
@@ -171,8 +209,16 @@ def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
         
         filtered_calls['dte'] = dte
         
-        # 计算近似delta
-        filtered_calls['approx_delta'] = abs(filtered_calls['strike'] - current_price) / current_price
+        # 获取真实Delta数据
+        if has_greeks and 'delta' in filtered_calls.columns:
+            # 使用真实Delta数据
+            filtered_calls['real_delta'] = abs(filtered_calls['delta'])
+            st.success(f"✅ 使用真实Delta数据 (范围: {filtered_calls['real_delta'].min():.3f} - {filtered_calls['real_delta'].max():.3f})")
+        else:
+            # 使用改进的近似计算
+            # 对于看涨期权，Delta通常为正值
+            filtered_calls['real_delta'] = abs(filtered_calls['strike'] - current_price) / current_price
+            st.info("ℹ️ 使用计算的Delta近似值")
         
         return filtered_calls
     except Exception as e:
@@ -331,23 +377,57 @@ def main():
             if result_df is not None and not result_df.empty:
                 st.subheader(f"🎯 {strategy_type}筛选结果")
                 
+                # 检查是否有其他希腊字母数据
+                greek_columns = ['gamma', 'theta', 'vega', 'rho', 'impliedVolatility']
+                available_greeks = [col for col in greek_columns if col in result_df.columns]
+                
+                if available_greeks:
+                    st.info(f"📊 可用的希腊字母数据: {', '.join(available_greeks)}")
+                    
+                    # 显示希腊字母统计
+                    with st.expander("📈 希腊字母统计信息"):
+                        greek_stats = {}
+                        for greek in available_greeks:
+                            if greek in result_df.columns:
+                                greek_data = pd.to_numeric(result_df[greek], errors='coerce').dropna()
+                                if not greek_data.empty:
+                                    greek_stats[greek] = {
+                                        '平均值': greek_data.mean(),
+                                        '最小值': greek_data.min(),
+                                        '最大值': greek_data.max(),
+                                        '标准差': greek_data.std()
+                                    }
+                        
+                        if greek_stats:
+                            stats_df = pd.DataFrame(greek_stats).T
+                            st.dataframe(stats_df.round(4))
+                
                 # 准备显示数据
-                display_df = result_df[[
-                    'contractSymbol', 'dte', 'strike', 'premium', 'approx_delta',
-                    'volume', 'openInterest', 'annualizedReturn'
-                ]].copy()
+                base_columns = ['contractSymbol', 'dte', 'strike', 'premium', 'real_delta', 'volume', 'openInterest', 'annualizedReturn']
+                
+                # 如果有隐含波动率，也显示出来
+                if 'impliedVolatility' in result_df.columns:
+                    base_columns.insert(-1, 'impliedVolatility')
+                
+                display_df = result_df[base_columns].copy()
                 
                 # 格式化数据
                 display_df['strike'] = display_df['strike'].map('${:.2f}'.format)
                 display_df['premium'] = display_df['premium'].map('${:.2f}'.format)
-                display_df['approx_delta'] = display_df['approx_delta'].map('{:.3f}'.format)
+                display_df['real_delta'] = display_df['real_delta'].map('{:.3f}'.format)
                 display_df['annualizedReturn'] = display_df['annualizedReturn'].map('{:.2%}'.format)
                 
+                # 如果有隐含波动率，也格式化
+                if 'impliedVolatility' in display_df.columns:
+                    display_df['impliedVolatility'] = display_df['impliedVolatility'].map('{:.2%}'.format)
+                
                 # 重命名列
-                display_df.columns = [
-                    '合约代码', '到期天数', '行权价', '权利金', '近似Delta',
-                    '成交量', '持仓量', '年化收益率'
-                ]
+                column_names = ['合约代码', '到期天数', '行权价', '权利金', 'Delta', '成交量', '持仓量']
+                if 'impliedVolatility' in display_df.columns:
+                    column_names.append('隐含波动率')
+                column_names.append('年化收益率')
+                
+                display_df.columns = column_names
                 
                 # 显示表格
                 st.dataframe(
@@ -396,26 +476,26 @@ def main():
                     
                     # 清理数据
                     plot_df['volume'] = pd.to_numeric(plot_df['volume'], errors='coerce').fillna(1)
-                    plot_df['approx_delta'] = pd.to_numeric(plot_df['approx_delta'], errors='coerce')
+                    plot_df['real_delta'] = pd.to_numeric(plot_df['real_delta'], errors='coerce')
                     plot_df['annualizedReturn'] = pd.to_numeric(plot_df['annualizedReturn'], errors='coerce')
                     plot_df['strike'] = pd.to_numeric(plot_df['strike'], errors='coerce')
                     plot_df['dte'] = pd.to_numeric(plot_df['dte'], errors='coerce')
                     plot_df['premium'] = pd.to_numeric(plot_df['premium'], errors='coerce')
                     
                     # 移除包含 NaN 的行
-                    plot_df = plot_df.dropna(subset=['approx_delta', 'annualizedReturn', 'volume'])
+                    plot_df = plot_df.dropna(subset=['real_delta', 'annualizedReturn', 'volume'])
                     plot_df = plot_df[plot_df['volume'] > 0]  # 只保留volume > 0的数据
                     
                     if not plot_df.empty and len(plot_df) > 1:
                         fig3 = px.scatter(
                             plot_df,
-                            x='approx_delta',
+                            x='real_delta',
                             y='annualizedReturn',
                             size='volume',
                             hover_data=['strike', 'dte', 'premium'],
-                            title='收益率 vs 风险分析',
+                            title='收益率 vs Delta 分析',
                             labels={
-                                'approx_delta': '近似Delta (风险指标)',
+                                'real_delta': 'Delta (敏感度指标)',
                                 'annualizedReturn': '年化收益率',
                                 'volume': '成交量'
                             }
@@ -457,7 +537,7 @@ def main():
         **列说明：**
         - **行权价**: 期权的执行价格
         - **权利金**: 期权的卖出价格（每股）
-        - **近似Delta**: 与当前价格的距离（越小越接近）
+        - **Delta**: 期权价格对标的价格变化的敏感度
         - **年化收益率**: 如果期权到期无价值的预估收益率
         
         **风险提示：**
