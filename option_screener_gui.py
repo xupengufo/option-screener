@@ -159,50 +159,6 @@ def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
         st.error(f"分析期权数据时出错: {e}")
         return pd.DataFrame()
 
-def analyze_and_filter_calls(stock, exp, dte, current_price, min_otm, max_otm):
-    """分析和筛选看涨期权"""
-    try:
-        calls = stock.option_chain(exp).calls
-
-        # 按OTM范围筛选 (对于看涨期权，OTM意味着行权价高于当前价格)
-        min_strike = current_price * (1 + min_otm)
-        max_strike = current_price * (1 + max_otm)
-        
-        filtered_calls = calls[
-            (calls['strike'] >= min_strike) &
-            (calls['strike'] <= max_strike)
-        ].copy()
-
-        # 使用bid价格，如果为0则使用lastPrice
-        filtered_calls['premium'] = filtered_calls.apply(
-            lambda row: row['bid'] if row['bid'] > 0 else row['lastPrice'], axis=1
-        )
-        
-        # 筛选有价格数据的期权
-        filtered_calls = filtered_calls[filtered_calls['premium'] > 0]
-        
-        # 对于备兑看涨期权，抵押品是股票价值（100股）
-        filtered_calls['collateral'] = current_price * 100
-        filtered_calls = filtered_calls[filtered_calls['collateral'] > 0]
-
-        if filtered_calls.empty:
-            return pd.DataFrame()
-
-        # 计算年化收益率
-        filtered_calls['annualizedReturn'] = (
-            (filtered_calls['premium'] * 100) / filtered_calls['collateral']
-        ) * (365 / dte)
-        
-        filtered_calls['dte'] = dte
-        
-        # 计算近似delta
-        filtered_calls['approx_delta'] = abs(filtered_calls['strike'] - current_price) / current_price
-        
-        return filtered_calls
-    except Exception as e:
-        st.error(f"分析期权数据时出错: {e}")
-        return pd.DataFrame()
-
 def screen_options_gui(ticker, min_dte, max_dte, min_otm, max_otm, strategy_type):
     """GUI版本的期权筛选主函数"""
     
